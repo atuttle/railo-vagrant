@@ -1,57 +1,101 @@
-# Make sure Ubuntu up-to-date
+# Run apt-get update to create the stamp file
+execute "apt-get-update" do
+  command "apt-get update"
+  ignore_failure true
+  not_if do ::File.exists?('/var/lib/apt/periodic/update-success-stamp') end
+  action :nothing
+end
+
+# For other recipes to call to force an update
 execute "apt-get update" do
-  action :run
+  command "apt-get update"
+  ignore_failure true
+  action :nothing
+end
+
+# provides /var/lib/apt/periodic/update-success-stamp on apt-get update
+package "update-notifier-common" do
+  notifies :run, resources(:execute => "apt-get-update"), :immediately
+end
+
+execute "apt-get-update-periodic" do
+  command "apt-get update"
+  ignore_failure true
+  only_if do
+    File.exists?('/var/lib/apt/periodic/update-success-stamp') &&
+    File.mtime('/var/lib/apt/periodic/update-success-stamp') < Time.now - 86400
+  end
+end
+
+include_recipe "mysql::server"
+# include_recipe "tomcat::default"
+include_recipe "database::mysql"
+include_recipe 'git'
+include_recipe 'vim'
+include_recipe "apache2"
+include_recipe "apache2::mod_proxy"
+apache_module "proxy_ajp"
+
+web_app "my_site" do
+  template "mysite.conf.erb"
+  #example of passing in a parameter
+  server_name node['hostname']
 end
 
 # install Tomcat
-package "tomcat7" do
-	action :install
+package "tomcat#{node[:tomcat_version]}" do
+  action :install
+end
+
+# create a mysql database
+mysql_database 'oracle_rules' do
+  connection ({:host => "localhost", :username => 'root', :password => node['mysql']['server_root_password']})
+  action :create
 end
 
 # Download Railo JARs (http://www.getrailo.org/index.cfm/download/)
-remote_file "/tmp/railo-3.3.4.003-jars.tar.gz" do
-  source "http://www.getrailo.org/railo/remote/download/3.3.4.003/custom/all/railo-3.3.4.003-jars.tar.gz"
+remote_file "/tmp/railo-#{node[:railo_version]}-jars.tar.gz" do
+  source "http://www.getrailo.org/railo/remote/download/#{node[:railo_version]}/custom/all/railo-#{node[:railo_version]}-jars.tar.gz"
   action :create_if_missing
   mode "0744"
   owner "root"
   group "root"
 end
-
+    
 # untar it
-execute "tar xvzf railo-3.3.4.003-jars.tar.gz" do
-  creates "railo-3.3.4.003-jars"
+execute "tar xvzf railo-#{node[:railo_version]}-jars.tar.gz" do
+  creates "railo-#{node[:railo_version]}-jars"
   action :run
   user "root"
   cwd "/tmp"
 end
 
 # set jar permissions
-execute "chown tomcat7:tomcat7 . -R" do
-	action :run
-	user "root"
-	cwd "/tmp/railo-3.3.4.003-jars"
+execute "chown tomcat#{node[:tomcat_version]}:tomcat#{node[:tomcat_version]} . -R" do
+  action :run
+  user "root"
+  cwd "/tmp/railo-#{node[:railo_version]}-jars"
 end
 
 # move jars to tomcat
-execute "mv * /var/lib/tomcat7/common" do
-	action :run
-	creates "/var/lib/tomcat7/common/railo.jar"
-	user "root"
-	cwd "/tmp/railo-3.3.4.003-jars"
+execute "mv * /var/lib/tomcat#{node[:tomcat_version]}/common" do
+  action :run
+  creates "/var/lib/tomcat#{node[:tomcat_version]}/common/railo.jar"
+  user "root"
+  cwd "/tmp/railo-#{node[:railo_version]}-jars"
 end
 
 # update Tomcat web.xml
-template "/var/lib/tomcat7/conf/web.xml" do
+template "/var/lib/tomcat#{node[:tomcat_version]}/conf/web.xml" do
    source "web.xml.erb"
    mode 0644
    owner "root"
-   group "tomcat7"
+   group "tomcat#{node[:tomcat_version]}"
 end
 
-service "tomcat7" do
+service "tomcat#{node[:tomcat_version]}" do
   action [:enable, :start]
 end
-
 
 # copy index.cfm
 template "/var/www-code/index.cfm" do
@@ -78,34 +122,28 @@ template "/etc/hosts" do
    group "root"
 end
 
-
-
-
-
-
-
 # copy server.xml
-template "/var/lib/tomcat7/conf/server.xml" do
+template "/var/lib/tomcat#{node[:tomcat_version]}/conf/server.xml" do
    source "server.xml.erb"
    mode 0644
    owner "root"
-   group "tomcat7"
+   group "tomcat#{node[:tomcat_version]}"
 end
 
-# restart Tomcat
-service "tomcat7" do
+# restart Apache
+service "apache2" do
   action :restart
 end
 
-
-
-
+# restart Tomcat
+service "tomcat#{node[:tomcat_version]}" do
+  action :restart
+end
 
 # run admin.cfm
 http_request "null" do
-  url "http://#{node[:railo][:hostname]}:8080/_admin.cfm"
+  url "http://#{node[:railo][:hostname]}/_admin.cfm"
 end
-
 
 # delete _admin.cfm
 file "/var/www-code/_admin.cfm" do
@@ -113,24 +151,40 @@ file "/var/www-code/_admin.cfm" do
   user "root"
 end
 
+# add your framework option
+if node.attribute?('coldfusion_framework')
+  package "zip"
 
-# left some specific steps you might want for you app in - commented out below
+  case "#{node[:coldfusion_framework]}"
+  when "coldbox"
+    execute "wget -O /tmp/framework.zip http://www.coldbox.org/download/coldbox/standalone/true" do
+      action :run
+      user "root"
+      cwd "/tmp"
+    end
+  when "fw1"
+    #to this git://github.com/seancorfield/fw1.git
+  when "cfwheels"
+    execute "wget -O /tmp/framework.zip http://cfwheels.org/download/latest-version" do
+      action :run
+      user "root"
+      cwd "/tmp"
+    end
+    #to wget http://cfwheels.org/download/latest-version
+  end
 
+  # untar it
+  execute "unzip -o framework.zip -d /vagrant/code" do
+    creates "code"
+    action :run
+    user "root"
+    cwd "/tmp"
+  end
 
-# ensure git installed
-#package "git"
-
-
-# copy ColdBox to /tmp so we can work with it
-# directory "/tmp/coldbox" do
-# 	action :create
-# end
-# git "/tmp/coldbox" do
-#   repository "git://github.com/ColdBox/coldbox-platform.git"
-#   reference "master"
-#   action :sync
-# end
-
-
-
-
+  # set permissions
+  execute "chown -R 777 code" do
+    action :run
+    user "root"
+    cwd "/vagrant"
+  end
+end
